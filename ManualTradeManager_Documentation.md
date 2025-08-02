@@ -11,11 +11,11 @@ De Manual Trade Manager EA is een geavanceerde MT5 Expert Advisor die automatisc
 - Werkt met trades geopend vanaf MT5 mobile app
 - Meerdere trades kunnen tegelijkertijd beheerd worden zonder conflict
 
-### 🔥 **NIEUW: Intelligent Grid System**
-- **Automatische Grid Entries**: EA plaatst automatisch 2 extra limit orders na handmatige entry
+### 🔥 **NIEUW: Intelligent Range Averaging System**
+- **Price Trigger Entries**: EA plaatst automatisch market orders wanneer prijs tegen je in beweegt
+- **Unified Stop Loss**: Alle grid entries krijgen exact dezelfde SL als originele trade
 - **3 Lot Size Methoden**: Fixed Ratio, Fixed Amount, of Custom Weights
-- **3 Timing Opties**: Immediate, Progressive (tijd-gebaseerd), of Price-based
-- **3 Management Strategieën**: Individual, Combined (average entry), of Tiered
+- **Range Protection**: Voorkomt front-running door entries te spreiden over range
 
 ### 📊 Trade Management Features
 - **Stop Loss & Take Profit**: Vaste pip-waarden (instelbaar)
@@ -68,34 +68,20 @@ TrailingStartPips = 20           // Start trailing na X pips profit
 TrailingStepPips = 10            // Verplaats SL per X pips beweging
 ```
 
-### Grid System Settings
+### Range Averaging Settings
 ```
-EnableGridSystem = true          // Grid systeem aan/uit
-GridSpacingPips = 50            // Afstand tussen grid levels in pips
-MaxGridLevels = 3               // Maximum aantal grid levels (inclusief handmatige entry)
+EnableGridSystem = true          // Range averaging systeem aan/uit
+GridSpacingPips = 50            // Afstand tussen trigger levels in pips
+MaxGridLevels = 3               // Maximum aantal entries (inclusief handmatige entry)
 ```
 
-### Grid Lot Sizing
+### Lot Size Configuration
 ```
 GridLotSizeMethod = 1           // 1=Fixed Ratio, 2=Fixed Amount, 3=Custom Weights
 FixedRatio = 0.8               // Ratio per level (method 1): 1.0 → 0.8 → 0.64
 FixedAmount = 0.1              // Vaste lot size voor alle levels (method 2)
-CustomWeight2 = 30.0           // Grid level 2 percentage (method 3)
-CustomWeight3 = 20.0           // Grid level 3 percentage (method 3)
-```
-
-### Grid Timing
-```
-GridTimingMethod = 1           // 1=Immediate, 2=Progressive, 3=Price-based
-ProgressiveDelay = 5           // Vertraging tussen orders in seconden (method 2)
-PriceBasedTriggerPips = 20     // Trigger afstand in pips (method 3)
-```
-
-### Grid Management
-```
-GridManagementMethod = 1       // 1=Individual, 2=Combined, 3=Tiered
-CombinedSLOffset = 10         // SL offset van average entry (method 2)
-TieredSLAdjustPips = 15       // SL aanpassing per level (method 3)
+CustomWeight2 = 30.0           // Level 2 percentage van handmatige entry (method 3)
+CustomWeight3 = 20.0           // Level 3 percentage van handmatige entry (method 3)
 ```
 
 ### Risk Management
@@ -116,32 +102,35 @@ ManageOnlyNewTrades = true        // Beheer alleen trades na EA start
 ### Dagelijkse Workflow
 1. **Start EA op VPS**: Zorg dat EA actief is op je VPS
 2. **Open Trade op Telefoon**: Gebruik MT5 mobile app voor trade entry
-3. **Automatisch Grid Setup**: EA detecteert trade en plaatst automatisch grid orders
-4. **Trade Management**: Alle entries krijgen automatisch SL/TP management
+3. **Automatisch Range Setup**: EA detecteert trade en berekent trigger prices
+4. **Price Monitoring**: EA monitort continu of trigger levels worden geraakt
+5. **Market Entry Execution**: Bij trigger → onmiddellijke market order met unified SL
 5. **Monitor via Mobile**: Volg trade progress via telefoon
 6. **Automatische Exit**: Trades worden gesloten bij SL, TP of handmatige sluiting
 
-## 🔥 Grid System Functionaliteit
+## 🔥 Range Averaging System Functionaliteit
 
-### Hoe het Grid System Werkt
+### Hoe het Range Averaging Werkt
 
 **Voorbeeld Short Trade:**
 ```
-Handmatige Entry: 112.650 (0.5 lot) - Level 1
-↓ +50 pips
-Auto Grid Entry:  112.700 (0.4 lot) - Level 2 (limit order)
-↓ +50 pips  
-Auto Grid Entry:  112.750 (0.32 lot) - Level 3 (limit order)
+1. Handmatige Entry: 112.650 (0.5 lot, SL @ 112.700)
+2. Prijs stijgt naar 112.700 → TRIGGER → Market Short @ 112.700 (0.4 lot, SL @ 112.700)
+3. Prijs stijgt naar 112.750 → TRIGGER → Market Short @ 112.750 (0.32 lot, SL @ 112.700)
 ```
 
 **Voorbeeld Long Trade:**
 ```
-Handmatige Entry: 112.650 (0.5 lot) - Level 1
-↑ -50 pips
-Auto Grid Entry:  112.600 (0.4 lot) - Level 2 (limit order)
-↑ -50 pips
-Auto Grid Entry:  112.550 (0.32 lot) - Level 3 (limit order)
+1. Handmatige Entry: 112.650 (0.5 lot, SL @ 112.600)
+2. Prijs daalt naar 112.600 → TRIGGER → Market Long @ 112.600 (0.4 lot, SL @ 112.600)
+3. Prijs daalt naar 112.550 → TRIGGER → Market Long @ 112.550 (0.32 lot, SL @ 112.600)
 ```
+
+### ✅ **Voordelen van Price Triggers:**
+- **Geen Front-running**: Orders worden pas geplaatst bij daadwerkelijke prijs beweging
+- **Unified Risk**: Alle entries hebben exact dezelfde stop loss
+- **Real Range Coverage**: Entries worden alleen genomen als prijs echt die levels raakt
+- **Market Execution**: Onmiddellijke fills, geen slippage bij limit orders
 
 ### Grid Lot Size Methoden
 
@@ -163,41 +152,22 @@ Auto Grid Entry:  112.550 (0.32 lot) - Level 3 (limit order)
 - Level 3: 20% van handmatige entry
 - **Voordeel**: Volledige controle over verdeling
 
-### Grid Timing Methoden
+### Range Trigger System
 
-#### **Method 1: Immediate (Standaard)**
-- Grid orders worden direct na handmatige entry geplaatst
-- **Voordeel**: Snelle setup, geen gemiste kansen
+#### **Price Monitoring:**
+- EA monitort continu de marktprijs
+- Trigger levels worden berekend op basis van GridSpacingPips
+- Wanneer prijs trigger level raakt → onmiddellijke market order
 
-#### **Method 2: Progressive**
-- Level 2: Na 5 seconden (instelbaar)
-- Level 3: Na 10 seconden
-- **Voordeel**: Gespreid plaatsen van orders
+#### **Unified Stop Loss Management:**
+- **Alle entries krijgen exact dezelfde SL** als de originele handmatige trade
+- **Geen aparte SL berekening** per level
+- **Consistent risico** over alle entries in de range
 
-#### **Method 3: Price-based**
-- Grid orders pas na X pips beweging (standaard 20 pips)
-- **Voordeel**: Alleen plaatsen als markt al beweegt
-
-### Grid Management Strategieën
-
-#### **Method 1: Individual (Standaard)**
-- Elke entry heeft eigen SL/TP
-- SL Level 1: Entry - 50 pips
-- SL Level 2: Entry - 50 pips
-- SL Level 3: Entry - 50 pips
-- **Voordeel**: Simpel, elke trade onafhankelijk
-
-#### **Method 2: Combined**
-- SL/TP gebaseerd op gemiddelde entry price
-- Average entry wordt herberekend bij elke nieuwe fill
-- **Voordeel**: Betere overall risk/reward
-
-#### **Method 3: Tiered**
-- SL wordt aangepast per level
-- Level 1: Entry - 50 pips
-- Level 2: Entry - 65 pips (50 + 15)
-- Level 3: Entry - 80 pips (50 + 30)
-- **Voordeel**: Meer ruimte voor verdere entries
+#### **Smart Execution:**
+- **Real-time triggers**: Alleen wanneer prijs daadwerkelijk beweegt
+- **Market orders**: Onmiddellijke fills, geen wachten
+- **No front-running**: Orders worden niet vooraf geplaatst
 
 ### Breakeven Functionaliteit
 - **Trigger**: Wanneer trade X R profit heeft (standaard 1R)
@@ -306,10 +276,10 @@ Risk Percentage = Risk Amount / Account Balance × 100
 ## Version History
 
 ### v2.0 (Huidige Versie)
-- **NIEUW: Intelligent Grid System** met automatische extra entries
+- **NIEUW: Range Averaging System** met price trigger entries
+- **NIEUW: Unified Stop Loss** - alle entries krijgen zelfde SL
+- **NIEUW: Market Order Execution** bij price triggers
 - **NIEUW: 3 Lot Size Methoden** (Fixed Ratio, Fixed Amount, Custom Weights)
-- **NIEUW: 3 Timing Strategieën** (Immediate, Progressive, Price-based)
-- **NIEUW: 3 Management Opties** (Individual, Combined, Tiered)
 - Automatische detectie handmatige trades
 - Configureerbare SL/TP in pips
 - Breakeven functionaliteit met R-multiple trigger

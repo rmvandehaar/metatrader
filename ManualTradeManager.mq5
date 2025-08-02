@@ -84,15 +84,17 @@ struct GridSystem
     ENUM_POSITION_TYPE direction;
     double   master_entry_price;
     double   master_lot_size;
+    double   master_sl;
+    double   master_tp;
     ulong    master_ticket;
     datetime creation_time;
-    bool     level2_placed;
-    bool     level3_placed;
-    bool     level2_filled;
-    bool     level3_filled;
-    ulong    level2_ticket;
-    ulong    level3_ticket;
-    datetime last_timing_check;
+    double   level2_trigger_price;
+    double   level3_trigger_price;
+    bool     level2_triggered;
+    bool     level3_triggered;
+    ulong    level2_position;
+    ulong    level3_position;
+    datetime last_price_check;
 };
 
 ManagedPosition managed_positions[];
@@ -537,13 +539,31 @@ void CreateGridSystem(ulong master_ticket)
     grid_systems[new_index].master_lot_size = lot_size;
     grid_systems[new_index].master_ticket = master_ticket;
     grid_systems[new_index].creation_time = TimeCurrent();
-    grid_systems[new_index].level2_placed = false;
-    grid_systems[new_index].level3_placed = false;
-    grid_systems[new_index].level2_filled = false;
-    grid_systems[new_index].level3_filled = false;
-    grid_systems[new_index].level2_ticket = 0;
-    grid_systems[new_index].level3_ticket = 0;
-    grid_systems[new_index].last_timing_check = TimeCurrent();
+    // Get master position SL/TP for unified management
+    if(PositionSelectByTicket(master_ticket))
+    {
+        grid_systems[new_index].master_sl = PositionGetDouble(POSITION_SL);
+        grid_systems[new_index].master_tp = PositionGetDouble(POSITION_TP);
+    }
+    
+    // Calculate trigger prices
+    double pip_value = GetPipValue(symbol);
+    if(pos_type == POSITION_TYPE_SELL)
+    {
+        grid_systems[new_index].level2_trigger_price = entry_price + (GridSpacingPips * pip_value);
+        grid_systems[new_index].level3_trigger_price = entry_price + (GridSpacingPips * 2 * pip_value);
+    }
+    else
+    {
+        grid_systems[new_index].level2_trigger_price = entry_price - (GridSpacingPips * pip_value);
+        grid_systems[new_index].level3_trigger_price = entry_price - (GridSpacingPips * 2 * pip_value);
+    }
+    
+    grid_systems[new_index].level2_triggered = false;
+    grid_systems[new_index].level3_triggered = false;
+    grid_systems[new_index].level2_position = 0;
+    grid_systems[new_index].level3_position = 0;
+    grid_systems[new_index].last_price_check = TimeCurrent();
     
     // Update master position with grid info
     UpdateMasterPositionGridInfo(master_ticket, grid_systems[new_index].grid_id);
@@ -583,26 +603,8 @@ void UpdateGridSystems()
             continue;
         }
         
-        // Process grid level 2
-        if(!grid_systems[i].level2_placed && MaxGridLevels >= 2)
-        {
-            if(ShouldPlaceGridLevel(i, 2))
-            {
-                PlaceGridLevel(i, 2);
-            }
-        }
-        
-        // Process grid level 3
-        if(!grid_systems[i].level3_placed && MaxGridLevels >= 3)
-        {
-            if(ShouldPlaceGridLevel(i, 3))
-            {
-                PlaceGridLevel(i, 3);
-            }
-        }
-        
-        // Check for filled grid orders
-        CheckGridOrderFills(i);
+        // Check for price triggers
+        CheckPriceTriggers(i);
         
         // Apply grid management
         ApplyGridManagement(i);
@@ -610,83 +612,109 @@ void UpdateGridSystems()
 }
 
 //+------------------------------------------------------------------+
-//| Check if grid level should be placed                           |
+//| Check for price triggers and execute market orders             |
 //+------------------------------------------------------------------+
-bool ShouldPlaceGridLevel(int grid_index, int level)
-{
-    if(grid_index < 0 || grid_index >= ArraySize(grid_systems)) return false;
-    
-    GridSystem& grid = grid_systems[grid_index];
-    datetime current_time = TimeCurrent();
-    
-    switch(GridTimingMethod)
-    {
-        case 1: // Immediate
-            return true;
-            
-        case 2: // Progressive
-            datetime time_since_creation = current_time - grid.creation_time;
-            int required_delay = (level - 1) * ProgressiveDelay;
-            return time_since_creation >= required_delay;
-            
-        case 3: // Price-based
-            if(!PositionSelectByTicket(grid.master_ticket)) return false;
-            double current_price = PositionGetDouble(POSITION_PRICE_CURRENT);
-            double pip_value = GetPipValue(grid.symbol);
-            double price_distance = MathAbs(current_price - grid.master_entry_price) / pip_value;
-            return price_distance >= PriceBasedTriggerPips;
-    }
-    
-    return false;
-}
-
-//+------------------------------------------------------------------+
-//| Place grid level order                                          |
-//+------------------------------------------------------------------+
-void PlaceGridLevel(int grid_index, int level)
+void CheckPriceTriggers(int grid_index)
 {
     if(grid_index < 0 || grid_index >= ArraySize(grid_systems)) return;
     
     GridSystem& grid = grid_systems[grid_index];
-    double pip_value = GetPipValue(grid.symbol);
     
-    // Calculate grid level price
-    double grid_price;
+    // Get current market price
+    double current_price = 0;
     if(grid.direction == POSITION_TYPE_BUY)
     {
-        grid_price = grid.master_entry_price - (GridSpacingPips * (level - 1) * pip_value);
+        current_price = SymbolInfoDouble(grid.symbol, SYMBOL_ASK);
     }
     else
     {
-        grid_price = grid.master_entry_price + (GridSpacingPips * (level - 1) * pip_value);
+        current_price = SymbolInfoDouble(grid.symbol, SYMBOL_BID);
     }
+    
+    if(current_price == 0) return;
+    
+    // Check Level 2 trigger
+    if(!grid.level2_triggered && MaxGridLevels >= 2)
+    {
+        bool trigger_level2 = false;
+        
+        if(grid.direction == POSITION_TYPE_SELL && current_price >= grid.level2_trigger_price)
+        {
+            trigger_level2 = true;
+        }
+        else if(grid.direction == POSITION_TYPE_BUY && current_price <= grid.level2_trigger_price)
+        {
+            trigger_level2 = true;
+        }
+        
+        if(trigger_level2)
+        {
+            ExecuteGridEntry(grid_index, 2, current_price);
+        }
+    }
+    
+    // Check Level 3 trigger
+    if(!grid.level3_triggered && MaxGridLevels >= 3)
+    {
+        bool trigger_level3 = false;
+        
+        if(grid.direction == POSITION_TYPE_SELL && current_price >= grid.level3_trigger_price)
+        {
+            trigger_level3 = true;
+        }
+        else if(grid.direction == POSITION_TYPE_BUY && current_price <= grid.level3_trigger_price)
+        {
+            trigger_level3 = true;
+        }
+        
+        if(trigger_level3)
+        {
+            ExecuteGridEntry(grid_index, 3, current_price);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute grid entry with market order                           |
+//+------------------------------------------------------------------+
+void ExecuteGridEntry(int grid_index, int level, double current_price)
+{
+    if(grid_index < 0 || grid_index >= ArraySize(grid_systems)) return;
+    
+    GridSystem& grid = grid_systems[grid_index];
     
     // Calculate lot size for this level
     double grid_lot_size = CalculateGridLotSize(grid.master_lot_size, level);
     
-    // Place limit order
-    ENUM_ORDER_TYPE order_type = (grid.direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+    // Execute market order
+    ENUM_ORDER_TYPE order_type = (grid.direction == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     
-    if(trade.OrderOpen(grid.symbol, order_type, grid_lot_size, 0, grid_price, 0, 0, ORDER_TIME_GTC, 0, "GRID_" + IntegerToString(grid.grid_id) + "_L" + IntegerToString(level)))
+    string comment = "GRID_" + IntegerToString(grid.grid_id) + "_L" + IntegerToString(level);
+    
+    if(trade.PositionOpen(grid.symbol, order_type, grid_lot_size, current_price, grid.master_sl, grid.master_tp, comment))
     {
-        ulong order_ticket = trade.ResultOrder();
+        ulong position_ticket = trade.ResultDeal();
         
         if(level == 2)
         {
-            grid.level2_placed = true;
-            grid.level2_ticket = order_ticket;
+            grid.level2_triggered = true;
+            grid.level2_position = position_ticket;
         }
         else if(level == 3)
         {
-            grid.level3_placed = true;
-            grid.level3_ticket = order_ticket;
+            grid.level3_triggered = true;
+            grid.level3_position = position_ticket;
         }
         
-        Print("Grid level ", level, " placed for grid ", grid.grid_id, ". Price: ", DoubleToString(grid_price, _Digits), " Lot: ", DoubleToString(grid_lot_size, 2));
+        // Add to managed positions with unified SL
+        AddGridPositionToManagement(position_ticket, grid.grid_id, level, grid.master_sl, grid.master_tp);
+        
+        Print("Grid level ", level, " triggered for grid ", grid.grid_id, ". Entry: ", DoubleToString(current_price, _Digits), 
+              " Lot: ", DoubleToString(grid_lot_size, 2), " SL: ", DoubleToString(grid.master_sl, _Digits));
     }
     else
     {
-        Print("Failed to place grid level ", level, " for grid ", grid.grid_id, ". Error: ", GetLastError());
+        Print("Failed to execute grid level ", level, " for grid ", grid.grid_id, ". Error: ", GetLastError());
     }
 }
 
@@ -728,105 +756,42 @@ double CalculateGridLotSize(double master_lot_size, int level)
     return NormalizeDouble(result, 2);
 }
 
-//+------------------------------------------------------------------+
-//| Check for grid order fills                                     |
-//+------------------------------------------------------------------+
-void CheckGridOrderFills(int grid_index)
-{
-    if(grid_index < 0 || grid_index >= ArraySize(grid_systems)) return;
-    
-    GridSystem& grid = grid_systems[grid_index];
-    
-    // Check level 2 fill
-    if(grid.level2_placed && !grid.level2_filled)
-    {
-        if(IsOrderFilled(grid.level2_ticket))
-        {
-            grid.level2_filled = true;
-            ulong position_ticket = GetPositionTicketFromOrder(grid.level2_ticket);
-            if(position_ticket > 0)
-            {
-                AddGridPositionToManagement(position_ticket, grid.grid_id, 2);
-                Print("Grid level 2 filled for grid ", grid.grid_id, ". Position: ", position_ticket);
-            }
-        }
-    }
-    
-    // Check level 3 fill
-    if(grid.level3_placed && !grid.level3_filled)
-    {
-        if(IsOrderFilled(grid.level3_ticket))
-        {
-            grid.level3_filled = true;
-            ulong position_ticket = GetPositionTicketFromOrder(grid.level3_ticket);
-            if(position_ticket > 0)
-            {
-                AddGridPositionToManagement(position_ticket, grid.grid_id, 3);
-                Print("Grid level 3 filled for grid ", grid.grid_id, ". Position: ", position_ticket);
-            }
-        }
-    }
-}
 
 //+------------------------------------------------------------------+
-//| Check if order is filled                                       |
+//| Add grid position to management with unified SL                |
 //+------------------------------------------------------------------+
-bool IsOrderFilled(ulong order_ticket)
-{
-    if(order_ticket == 0) return false;
-    
-    if(OrderSelect(order_ticket))
-    {
-        return false; // Order still pending
-    }
-    
-    // Order not found in pending orders, check if it became a position
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Get position ticket from order                                 |
-//+------------------------------------------------------------------+
-ulong GetPositionTicketFromOrder(ulong order_ticket)
-{
-    // In MT5, when limit order fills, it creates position with same ticket
-    return order_ticket;
-}
-
-//+------------------------------------------------------------------+
-//| Add grid position to management                                |
-//+------------------------------------------------------------------+
-void AddGridPositionToManagement(ulong ticket, int grid_id, int level)
+void AddGridPositionToManagement(ulong ticket, int grid_id, int level, double unified_sl, double unified_tp)
 {
     if(!PositionSelectByTicket(ticket)) return;
     
     string symbol = PositionGetString(POSITION_SYMBOL);
     double volume = PositionGetDouble(POSITION_VOLUME);
     double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-    ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     
-    // Calculate SL/TP based on grid management method
-    double new_sl = 0, new_tp = 0;
-    CalculateGridSLTP(grid_id, level, symbol, open_price, pos_type, new_sl, new_tp);
+    // Note: SL/TP are already set during PositionOpen, but we verify here
+    double current_sl = PositionGetDouble(POSITION_SL);
+    double current_tp = PositionGetDouble(POSITION_TP);
     
-    // Apply SL/TP
-    if(trade.PositionModify(symbol, new_sl, new_tp))
+    // Ensure unified SL/TP if not already set correctly
+    if(MathAbs(current_sl - unified_sl) > Point * 5 || MathAbs(current_tp - unified_tp) > Point * 5)
     {
-        // Add to managed positions
-        int new_index = ArraySize(managed_positions);
-        ArrayResize(managed_positions, new_index + 1);
-        
-        managed_positions[new_index].ticket = ticket;
-        managed_positions[new_index].open_time = (datetime)PositionGetInteger(POSITION_TIME);
-        managed_positions[new_index].breakeven_applied = false;
-        managed_positions[new_index].is_managed = true;
-        managed_positions[new_index].original_sl = 0;
-        managed_positions[new_index].original_tp = 0;
-        managed_positions[new_index].risk_amount = CalculateRiskAmount(symbol, volume, open_price, new_sl);
-        managed_positions[new_index].grid_id = grid_id;
-        managed_positions[new_index].grid_level = level;
-        managed_positions[new_index].is_grid_master = false;
+        trade.PositionModify(symbol, unified_sl, unified_tp);
     }
+    
+    // Add to managed positions
+    int new_index = ArraySize(managed_positions);
+    ArrayResize(managed_positions, new_index + 1);
+    
+    managed_positions[new_index].ticket = ticket;
+    managed_positions[new_index].open_time = (datetime)PositionGetInteger(POSITION_TIME);
+    managed_positions[new_index].breakeven_applied = false;
+    managed_positions[new_index].is_managed = true;
+    managed_positions[new_index].original_sl = unified_sl;
+    managed_positions[new_index].original_tp = unified_tp;
+    managed_positions[new_index].risk_amount = CalculateRiskAmount(symbol, volume, open_price, unified_sl);
+    managed_positions[new_index].grid_id = grid_id;
+    managed_positions[new_index].grid_level = level;
+    managed_positions[new_index].is_grid_master = false;
 }
 
 //+------------------------------------------------------------------+
@@ -960,18 +925,7 @@ void CleanupGridSystem(int grid_index)
     
     GridSystem& grid = grid_systems[grid_index];
     
-    // Cancel pending orders
-    if(grid.level2_placed && !grid.level2_filled)
-    {
-        trade.OrderDelete(grid.level2_ticket);
-    }
-    
-    if(grid.level3_placed && !grid.level3_filled)
-    {
-        trade.OrderDelete(grid.level3_ticket);
-    }
-    
-    Print("Grid system ", grid.grid_id, " cleaned up");
+    Print("Grid system ", grid.grid_id, " cleaned up - master position closed");
     
     // Remove from array
     for(int i = grid_index; i < ArraySize(grid_systems) - 1; i++)
